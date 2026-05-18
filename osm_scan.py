@@ -177,27 +177,64 @@ HOOK_NAMES = {
     "p4-post-changelist","p4-pre-submit",
 }
 
+JS_TS_EXTS = {".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx"}
+
+
+def _scope_any(rel, fn, ext):
+    return True
+
+
+def _scope_js_ts_like(rel, fn, ext):
+    return ext in JS_TS_EXTS or fn == "package.json" or ext == ".json"
+
+
+def _scope_py(rel, fn, ext):
+    return ext == ".py"
+
+
+def _scope_gitattributes(rel, fn, ext):
+    return fn == ".gitattributes"
+
+
+def _scope_gitconfig(rel, fn, ext):
+    parts = Path(rel).parts
+    return fn in {".gitconfig", "config"} and any(p == ".git" or p.startswith(".git") for p in parts) \
+        or fn == ".gitconfig"
+
+
+# (severity, description, compiled_regex, scope_predicate)
+# Each rule is anchored to a real invocation context AND scoped to file types
+# where the pattern is meaningful, so the rule's own description/regex source
+# cannot match itself.
 CONTENT_RULES = [
     ("high", "curl/wget piped to shell",
-        re.compile(rb"\b(?:curl|wget)\b[^\n|]{0,200}\|\s*(?:bash|sh|zsh)\b")),
+        re.compile(rb"\b(?:curl|wget)\b[^\n|]{0,200}\|\s*(?:bash|sh|zsh)\b"),
+        _scope_any),
     ("high", "PowerShell stealth/IEX/EncodedCommand",
-        re.compile(rb"powershell[^\n]{0,300}?(-WindowStyle\s+Hidden|-EncodedCommand|Invoke-Expression|\bIEX\b|Start-Process)", re.I)),
-    ("high", "shell:true in child process call",
-        re.compile(rb"shell\s*:\s*(?:true|!!\s*\[\s*\])")),
+        re.compile(
+            rb"(?:^|[\s;&|`>(])powershell(?:\.exe)?\s+[^\n]{0,300}?"
+            rb"(?:-w(?:indowstyle)?\s+hidden\b|-e(?:c|nc(?:odedcommand)?)\b|"
+            rb"invoke-expression\s*[\(\"']|\biex\s*[\(\"']|start-process\s+\S)",
+            re.I),
+        _scope_any),
+    ("high", "shell:true in child process options",
+        re.compile(rb"[{,]\s*['\"]?shell['\"]?\s*:\s*true\b"),
+        _scope_js_ts_like),
     ("high", "base64 piped to shell",
-        re.compile(rb"base64\s+(?:-d|--decode)[^\n|]{0,200}\|\s*(?:bash|sh)\b")),
-    ("medium", "child_process import (JS/TS)",
-        re.compile(rb"""(?:require\(\s*['"]child_process['"]\s*\)|from\s+['"]child_process['"])""")),
-    ("medium", "exec/spawn/execSync call",
-        re.compile(rb"\b(?:exec|execSync|spawn|spawnSync|execFile|execFileSync)\s*\(")),
+        re.compile(rb"\bbase64\s+(?:-d|--decode)\b[^\n|]{0,200}\|\s*(?:bash|sh)\b"),
+        _scope_any),
     ("medium", "subprocess with shell=True",
-        re.compile(rb"subprocess\.[A-Za-z_]+\s*\([^)]{0,400}shell\s*=\s*True", re.S)),
+        re.compile(rb"\bsubprocess\.[A-Za-z_]+\s*\([^)]{0,400}shell\s*=\s*True", re.S),
+        _scope_py),
     ("medium", "os.system / os.popen",
-        re.compile(rb"\bos\.(?:system|popen)\s*\(")),
+        re.compile(rb"\bos\.(?:system|popen)\s*\("),
+        _scope_py),
     ("medium", ".gitattributes smudge/clean filter (non-lfs)",
-        re.compile(rb"(?m)^\s*\S+\s+.*\bfilter=(?!lfs\b)\S+")),
+        re.compile(rb"(?m)^\s*\S+\s+.*\bfilter=(?!lfs\b)\S+"),
+        _scope_gitattributes),
     ("medium", "core.hooksPath override",
-        re.compile(rb"core\.hooksPath\b|\[core\][^\[]{0,200}hooksPath\s*=", re.I)),
+        re.compile(rb"(?im)^\s*hooksPath\s*="),
+        _scope_gitconfig),
 ]
 LIFECYCLE_KEYS = {"preinstall","install","postinstall","prepare","prepublish","prepublishOnly","preuninstall","postuninstall"}
 LIFECYCLE_BAD = re.compile(r"curl\b|wget\b|\bnode\s+-e\b|child_process|\beval\b|powershell|base64\s+-d|--decode\b|nc\s+-e|/dev/tcp/", re.I)
@@ -211,18 +248,26 @@ def _looks_binary(blob):
     return b"\x00" in blob[:4096]
 
 
-def _scan_text_content(rel_path, blob):
+def _scan_text_content(rel_path, blob, fn, ext):
     findings = []
-    for sev, desc, rx in CONTENT_RULES:
+    for sev, desc, rx, scope in CONTENT_RULES:
+        if not scope(rel_path, fn, ext):
+            continue
         if rx.search(blob):
             findings.append((sev, desc, rel_path))
-    # Obfuscator heuristic
-    if len(OBFUSCATOR_TOKEN.findall(blob)) >= 10:
+    # Obfuscator heuristic — JS/TS only (hex-ish identifiers occur naturally
+    # in regex sources and crypto libs in other languages).
+    if ext in JS_TS_EXTS and len(OBFUSCATOR_TOKEN.findall(blob)) >= 10:
         findings.append(("high", "JS obfuscator pattern (_0x… identifiers)", rel_path))
-    # Remote eval pattern
-    if EVAL_RE.search(blob) and URL_RE.search(blob):
-        sev = "high" if FETCHY_RE.search(blob) else "medium"
-        findings.append((sev, "eval() alongside remote URL fetch", rel_path))
+    # Remote-eval: only meaningful in JS/TS, and only when eval, a URL, and a
+    # fetch primitive sit within ~400 chars of each other (i.e. plausibly the
+    # same logical block), not merely co-occurring in a large file.
+    if ext in JS_TS_EXTS:
+        for m in EVAL_RE.finditer(blob):
+            window = blob[max(0, m.start() - 400): m.end() + 400]
+            if URL_RE.search(window) and FETCHY_RE.search(window):
+                findings.append(("high", "eval() alongside remote URL fetch", rel_path))
+                break
     return findings
 
 
@@ -266,7 +311,7 @@ def scan_local(repo_dir):
             if _looks_binary(blob):
                 continue
 
-            findings.extend(_scan_text_content(rel, blob))
+            findings.extend(_scan_text_content(rel, blob, fn, ext))
 
             if fn == "package.json":
                 try:
@@ -294,9 +339,7 @@ TAG_MAP = {
     "curl/wget piped to shell": "remote-shell",
     "base64 piped to shell": "obfuscated-shell",
     "PowerShell stealth/IEX/EncodedCommand": "powershell-stealth",
-    "shell:true in child process call": "child-process",
-    "child_process import (JS/TS)": "child-process",
-    "exec/spawn/execSync call": "child-process",
+    "shell:true in child process options": "child-process",
     "subprocess with shell=True": "child-process",
     "os.system / os.popen": "child-process",
     "JS obfuscator pattern (_0x… identifiers)": "obfuscated-code",
@@ -379,18 +422,29 @@ def main():
     tmp = tempfile.mkdtemp(prefix="osm_")
     repo_dir = os.path.join(tmp, "repo")
     try:
+        print("[*] Checking repository against OpenSourceMalware ...")
+        repo_res = osm_check("repository", args.url)
+        print(f"    repo: malicious={repo_res.get('malicious')} "
+              f"severity={repo_res.get('scan_severity')} "
+              f"scans={repo_res.get('scan_count')}")
+
+        if repo_res.get("malicious") is True:
+            osm_link = (
+                "https://opensourcemalware.com/repository/"
+                + urllib.parse.quote(args.url, safe="")
+            )
+            print()
+            print("=== VERDICT: UNSAFE ===")
+            print(f"[*] Trusting OpenSourceMalware verdict for {args.url}; skipping local scan.")
+            print(f"    see details at: {osm_link}")
+            sys.exit(2)
+
         print(f"[*] Downloading tarball {args.url} ...")
         try:
             fetch_repo(args.url, repo_dir)
         except ValueError as e:
             print(f"[!] {e}")
             sys.exit(1)
-
-        print("[*] Scanning repository ...")
-        repo_res = osm_check("repository", args.url)
-        print(f"    repo: malicious={repo_res.get('malicious')} "
-              f"severity={repo_res.get('scan_severity')} "
-              f"scans={repo_res.get('scan_count')}")
 
         print("[*] Collecting dependencies ...")
         deps = collect_deps(repo_dir)

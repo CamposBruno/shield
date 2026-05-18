@@ -1,5 +1,5 @@
 import { useEffect, useReducer, useRef, useState } from "react";
-import { Shield, ShieldAlert, ShieldCheck, AlertTriangle, Loader2 } from "lucide-react";
+import { Shield, ShieldAlert, ShieldCheck, AlertTriangle, Loader2, Github } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -75,12 +75,21 @@ export default function App() {
       <div className="container max-w-3xl py-10">
         <header className="mb-8 flex items-center gap-3">
           <Shield className="h-8 w-8 text-primary" />
-          <div>
+          <div className="flex-1">
             <h1 className="text-2xl font-bold tracking-tight">Shield</h1>
             <p className="text-sm text-muted-foreground">
               Scan a GitHub repository for malicious dependencies.
             </p>
           </div>
+          <a
+            href="https://github.com/CamposBruno/shield"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-muted-foreground transition-colors hover:text-foreground"
+            aria-label="View source on GitHub"
+          >
+            <Github className="h-5 w-5" />
+          </a>
         </header>
 
         <Card>
@@ -125,6 +134,39 @@ export default function App() {
             )}
           </CardContent>
         </Card>
+
+        {state.status === "idle" && (
+          <Card className="mt-6 border-amber-500/30 bg-amber-500/5">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <AlertTriangle className="h-4 w-4 text-amber-500" />
+                Why this tool exists
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2 text-sm text-muted-foreground">
+              <p>
+                Scammers posing as recruiters send developers a "coding test" hosted on
+                GitHub. The malware is buried in a project dependency, so it runs the moment
+                you <code>npm install</code> — exfiltrating credentials, keys, and wallets.
+              </p>
+              <p>
+                Shield clones the repo in isolation and inspects its dependencies for the
+                patterns these attacks use, so you can verify before you run anything.
+              </p>
+              <p className="text-xs">
+                Background:{" "}
+                <a
+                  href="https://www.linkedin.com/posts/bhncampos_8-scam-job-offers-this-week-alone-its-share-7460808656431931392-Og-y"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline underline-offset-2 hover:text-foreground"
+                >
+                  "8 scam job offers this week alone"
+                </a>
+              </p>
+            </CardContent>
+          </Card>
+        )}
 
         {state.error && (
           <Alert variant="destructive" className="mt-6">
